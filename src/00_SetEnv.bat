@@ -9,6 +9,7 @@ set COMP_ROOT=C:\NonStopC\L22.09
 
 path %PATH%;%COMP_ROOT%\usr\bin
 path %PATH%;%SSHDIR%
+path %PATH%;C:\msys\1.0\bin
 
 set COMP_ROOT=C:\NonStop\L23.08
 

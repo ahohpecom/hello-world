@@ -1,0 +1,1690 @@
+#!/bin/ksh
+
+# ************************************************************************
+# *  Licensed Materials - Property of IBM                                *
+# *                                                                      *
+# *  0791003, 5724-A39                                                   *
+# *  (C) Copyright IBM Corp. 1993, 2017                                  *
+# *                                                                      *
+# *  US Government Users Restricted Rights - Use, duplication or         *
+# *  disclosure restricted by GSA ADP Schedule Contract with IBM Corp.   *
+# ************************************************************************
+
+#
+# MQ for HP NonStop Server
+#
+#     Service Data Collection and Packaging tool - sdcp
+#     =================================================
+#
+# for gathering diagnostics about a queue manager
+# and its installation while it is running.
+#
+# Parameters:
+#
+# -d                  optional, enable debug output
+#                     (default is not enabled)
+# -w workingdir       optional, specify working directory
+#                     (default is current directory)
+# -m queuemgr         optional, queue manager to collect data on
+#                     (default is all queue managers)
+# -e                  optional, exclude data collection using runmqsc
+#                     and other utilities for running queue managers
+#                     (default is to include this data about objects,
+#                      channels, clustering and security)
+# -x                  optional, enable amqxdbg during run of sdcp
+#                     (default is off)
+# -f                  optional, include full detail for certain data
+#                     collection tasks, including WHOHAS.  This option
+#                     will cause sdcp to take significantly longer and
+#                     is not normally necessary
+#                     (default is normal level of detail)
+# -p pmr number       optional, specify the final archive filename using
+#                     IBM Tech Support naming convention
+# -c salesforce case  optional, specify the final archive filename using
+#                     IBM Tech Support Salesforce naming convention.
+#                     This will take priority over a supplied -p
+#                     argument.
+# -t timeout          optional, run some commands with timeout in seconds.
+#                     Useful if queue manager blocks.
+#                     (default is not enabled)
+#
+# The working directory is used as a location for temporary
+# files to be created as data is gathered about the installation.
+# By default, all files created in the working directory will have a common
+# prefix of MQSDCP, followed by the date and time when sdcp
+# was started.  For example:  "MQSDCP-090220-123729".
+# If the -p flag is specified, the prefix will consist of the pmr number
+# appended with 'SDCP'. For example: "03825,122,000-SDCP-090220-123729".
+# The working directory is also used as the location to store
+# the compressed archive that is created.  The final archive file
+# is named using the same prefix as for temporary files, followed
+# by "-archive.tar.Z".  As the name implies, this is a "tarball"
+# which may then be ftp'd in binary mode to IBM Support for
+# analysis.  For example: "MQSDCP-090220-123729-archive.tar.Z"
+#
+# Change Log:
+#
+# 11 April 2017  Initial version released with MQv8.
+# End of Change Log
+#
+
+
+export AWK="/bin/awk"
+export CAT="/bin/cat"
+export COMPRESS="/bin/compress"
+export CP="/bin/cp"
+export CUT="/bin/cut"
+export DATE="/bin/date"
+export EXPR="/bin/expr"
+export GREP="/bin/grep"
+export GTACL="/bin/gtacl"
+export HEAD="/bin/head"
+export LS="/bin/ls"
+export MKDIR="/bin/mkdir"
+export MV="/bin/mv"
+export PS="/bin/ps"
+export RM="/bin/rm"
+export SED="/bin/sed"
+export TAIL="/bin/tail"
+export TAR="/bin/tar"
+export TEE="/bin/tee"
+export UMASK="/bin/umask"
+export TIMEOUT=/usr/coreutils/bin/timeout
+
+if [[ -x "/usr/coreutils/bin/realpath" ]]; then
+  export REALPATH="/usr/coreutils/bin/realpath"
+fi
+
+export CD="cd"          # shell built-in
+export datetime=$(${DATE} +"%y%m%d-%H%M%S")
+export WorkRoot="MQSDCP-$datetime"
+
+# LCL_MQ_INSTALLATION_PATH is modified at install time to be the correct
+# directory for the installation if MQ is not installed in the default
+# directory.
+LCL_MQ_INSTALLATION_PATH=/MQ/opt/mqm
+
+###########################
+# Subroutines             #
+###########################
+
+#  write logfile and print function
+function sdcp_print
+  {
+    print "$*"
+    logdatetime=$(${DATE} +"20%y-%m-%d %H:%M:%S")
+    output=$(${CAT} >> $WorkRoot-sdcp.log << EOF
+$logdatetime   "$*"
+EOF
+            )
+
+  }
+export sdcp_print
+
+# TACL script processing
+
+function tacl_start
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} -f $TACL_180_FILE_OSS
+  ${RM} -f $TACL_101_FILE_OSS
+  print '#SET #INFORMAT TACL' > $TACL_180_FILE_OSS
+  print '== sdcp created this' >> $TACL_180_FILE_OSS
+}
+
+function tacl_add
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  print $* >> $TACL_180_FILE_OSS
+}
+
+function tacl_run
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${GTACL} -s -term /G/ZHOME -p ctoedit $TACL_180_FILE_GRD, $TACL_101_FILE_GRD
+  ${GTACL} -s -term /G/ZHOME -c "obey $TACL_101_FILE_GRD" > $1
+}
+
+function tacl_end
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} $TACL_180_FILE_OSS
+  ${RM} $TACL_101_FILE_OSS
+}
+
+function fup_start
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} -f $FUP_180_FILE_OSS
+  ${RM} -f $FUP_101_FILE_OSS
+  print '<' sdcp created this > $FUP_180_FILE_OSS
+}
+
+function fup_add
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  print $* >> $FUP_180_FILE_OSS
+}
+
+function fup_run
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${GTACL} -s -term /G/ZHOME -p ctoedit $FUP_180_FILE_GRD, $FUP_101_FILE_GRD
+  ${GTACL} -s -term /G/ZHOME -p fup obey $FUP_101_FILE_GRD > $1
+}
+
+function fup_end
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} $FUP_180_FILE_OSS
+  ${RM} $FUP_101_FILE_OSS
+}
+
+function qmgr_fup_start
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} -f $QM_FUP_180_FILE_OSS
+  ${RM} -f $QM_FUP_101_FILE_OSS
+  print '<' sdcp created this > $QM_FUP_180_FILE_OSS
+}
+
+function qmgr_fup_add
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  print $* >> $QM_FUP_180_FILE_OSS
+}
+
+function qmgr_fup_run
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${GTACL} -s -term /G/ZHOME -p ctoedit $QM_FUP_180_FILE_GRD, $QM_FUP_101_FILE_GRD
+  ${GTACL} -s -term /G/ZHOME -p fup obey $QM_FUP_101_FILE_GRD > $1
+}
+
+function qmgr_fup_end
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} $QM_FUP_180_FILE_OSS
+  ${RM} $QM_FUP_101_FILE_OSS
+}
+
+function sys_fup_start
+  {
+  if [[ -n $debug ]] ;then
+    set -x;set -v
+  fi
+
+  ${RM} -f $SYS_FUP_180_FILE_OSS
+  ${RM} -f $SYS_FUP_101_FILE_OSS
+  print '<' sdcp created this > $SYS_FUP_180_FILE_OSS
+ }
+
+function sys_fup_add
+  {
+    if [[ -n $debug ]] ;then
+      set -x;set -v
+    fi
+    print $* >> $SYS_FUP_180_FILE_OSS
+  }
+
+function sys_fup_run
+  {
+  if [[ -n $debug ]] ;then
+    set -x;set -v
+  fi
+
+  ${GTACL} -s -term /G/ZHOME -p ctoedit $SYS_FUP_180_FILE_GRD, $SYS_FUP_101_FILE_GRD
+  ${GTACL} -s -term /G/ZHOME -p fup obey $SYS_FUP_101_FILE_GRD > $1
+  }
+
+function sys_fup_end
+  {
+  if [[ -n $debug ]] ;then
+    set -x;set -v
+  fi
+
+  ${RM} $SYS_FUP_180_FILE_OSS
+  ${RM} $SYS_FUP_101_FILE_OSS
+  }
+
+# TACL script processing
+
+function sys_tacl_start
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} -f $SYS_TACL_180_FILE_OSS
+  ${RM} -f $SYS_TACL_101_FILE_OSS
+  print '#SET #INFORMAT TACL' > $SYS_TACL_180_FILE_OSS
+  print '== sdcp created this' >> $SYS_TACL_180_FILE_OSS
+}
+
+function sys_tacl_add
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  print $* >> $SYS_TACL_180_FILE_OSS
+}
+
+function sys_tacl_run
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${GTACL} -s -term /G/ZHOME -p ctoedit $SYS_TACL_180_FILE_GRD, $SYS_TACL_101_FILE_GRD
+  ${GTACL} -s -term /G/ZHOME -c "obey $SYS_TACL_101_FILE_GRD" > $1
+}
+
+function sys_tacl_end
+{
+  if [[ -n $debug ]] ;then
+      set -x;set -v
+  fi
+
+  ${RM} $SYS_TACL_180_FILE_OSS
+  ${RM} $SYS_TACL_101_FILE_OSS
+}
+
+function get_qmgr_directory
+{
+    unset Name
+
+    typeset qmgr=$1
+
+    ${CAT} $RuntimeTree/mqs.ini |\
+    ${AWK} '/^[ \t]*#/{next}/^[A-Za-z0-9]+:/ {printf "\n%s ",$0;next} {printf "%s ",$0}END{print ""}' |\
+    while read stanza attributes
+    do
+
+    if [[ -z $stanza || $stanza != QueueManager\: ]]
+    then
+            continue
+    fi
+
+    set -- $attributes
+    if [[ ! -z DataPath ]];then
+      # Clear DataPath, since it is not guaranteed to exist
+      # for a qmgr stanza, but might still be set by a previous one
+      eval unset DataPath
+    fi
+	
+    for var in "$@"
+    do
+        attribute=${var%%=*}
+        value=${var##*=}
+        eval $attribute="$value"
+    done
+
+    if [[ $Name = $qmgr ]]
+    then
+        return 0
+    fi
+
+    done
+}
+
+function sdcp_qmgr_in
+{
+sdcp_print "sdcp:: Getting Queue Manager $qmgr_name info"
+sdcp_print "sdcp:: Queue Manager directory = $qmgr_dir"
+# Figure out the Guardian filesystem names we need
+# \NODE.$VOL.SUBVOL.FILE
+GQMName=`gname -s $qmdir/G/AMQCLCKS`
+# $VOL.SUBVOL.FILE
+GQMNameNoNode=${GQMName##\\+([A-Za-z])*([A-Za-z0-9]).}
+# $VOL.SUBVOL
+GQMVolSubVol=${GQMNameNoNode%%.+([A-Za-z])*([A-Za-z0-9])}
+# SUBVOL
+GQMSubVol=${GQMVolSubVol##\$+([A-Za-z])*([A-Za-z0-9]).}
+# $VOL
+GQMVol=${GQMVolSubVol%%.+([A-Za-z])*([A-Za-z0-9])}
+# VOL
+GQMVolNoDollar=${GQMVol##\$}
+
+# set FUP script file variables and start up a script
+FUP_180_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/xxxfup
+FUP_101_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/yyyfup
+FUP_180_FILE_GRD=$GExeVolSubVol.xxxfup
+FUP_101_FILE_GRD=$GExeVolSubVol.yyyfup
+fup_start
+
+fup_add "INFO $GQMVolSubVol.*, detail"
+fup_run $WorkingDir/$WorkRoot-QMGR-$qmgr_name/QMFUPdata1
+
+fup_end
+
+# collect saveabend files from queue manager subvolume
+sdcp_print "sdcp:: Checking for saveabends in qmgr subvol"
+count=$(ls -1 $qmdir/G/zzsa* |wc -l)
+if [[ $count -gt 0  ]] then
+ ${CP} -p $qmdir/G/zzsa*   $WorkingDir/$WorkRoot-QMGR-$qmgr_name/GRDfiles 2>&1  | ${TEE} -a $WorkRoot-sdcp.log
+fi
+
+#Collecting runmqsc data
+sdcp_print "sdcp:: Retrieving Queue Manager object info"
+if [[ $excludemq != 1 ]] ; then
+     sdcp_print "sdcp:: runmqsc - Queue Manager Name $qmgr_name "
+     ${CD} $InstallationTree/bin
+     $TIMEOUT --kill-after=$timeoutCallingQM $timeoutCallingQM $InstallationTree/bin/runmqsc $qmgr_name > $WorkingDir/$WorkRoot-QMGR-$qmgr_name/RUNMQSC 2>&1 << EOF
+dis qmgr
+dis q (*) all
+dis process (*) all
+dis namelist (*) all
+dis qstatus (*) type(handle) all
+dis qstatus (*) all
+dis chl (*) all
+dis chs (*) all
+dis chs (*) saved all
+dis qc (*) all
+dis clusqmgr (*) all
+dis tpstatus (*) all
+dis authinfo (*) all
+dis comminfo (*) all
+dis listener (*) all
+dis lsstatus (*) all
+dis conn (*) all
+dis conn (*) type(handle) all
+dis sbstatus (*) all
+dis service (*) all
+dis svstatus (*) all
+dis topic (*) all
+dis tpstatus (*) all
+dis authrec all
+dis pubsub all
+dis qmstatus all
+EOF
+    if [[ $? -eq 124 ]]; then
+      sdcp_print "sdcp:: "
+      sdcp_print "sdcp:: Warning!"
+      sdcp_print "sdcp:: runmqsc timeout after ${timeoutCallingQM} seconds"
+      sdcp_print "sdcp:: runmqsc output might be incomplete"
+      sdcp_print "sdcp:: Adjust timeout value (-t option) and retry or resolve the runmqsc block"
+      sdcp_print "sdcp:: "
+    fi
+
+    $TIMEOUT --kill-after=$timeoutCallingQM $timeoutCallingQM $InstallationTree/bin/dmpmqcfg -m $qmgr_name -x all -o 1line >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DMPMQCFG 2>&1
+    if [[ $? -eq 124 ]]; then
+      sdcp_print "sdcp:: "
+      sdcp_print "sdcp:: Warning!"
+      sdcp_print "sdcp:: dmpmqcfg timeout after ${timeoutCallingQM} seconds"
+      sdcp_print "sdcp:: dmpmqcfg output might be incomplete"
+      sdcp_print "sdcp:: Adjust timeout value (-t option) and retry or resolve the dmpmqcfg block"
+      sdcp_print "sdcp:: "
+    fi
+
+    $TIMEOUT --kill-after=$timeoutCallingQM $timeoutCallingQM $InstallationTree/bin/dmpmqcfg -m $qmgr_name -o setmqaut >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DMPMQCFG 2>&1
+    if [[ $? -eq 124 ]]; then
+      sdcp_print "sdcp:: "
+      sdcp_print "sdcp:: Warning!"
+      sdcp_print "sdcp:: dmpmqcfg timeout after ${timeoutCallingQM} seconds"
+      sdcp_print "sdcp:: dmpmqcfg output might be incomplete"
+      sdcp_print "sdcp:: Adjust timeout value (-t option) and retry or resolve the dmpmqcfg block"
+      sdcp_print "sdcp:: "
+    fi
+
+    timeout_occured=0
+
+    ${MKDIR} $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DMPMQMSG
+
+    for queue in SYSTEM.ADMIN.ACTIVITY.QUEUE \
+                 SYSTEM.ADMIN.CHANNEL.EVENT \
+                 SYSTEM.ADMIN.COMMAND.EVENT \
+                 SYSTEM.ADMIN.COMMAND.QUEUE \
+                 SYSTEM.ADMIN.CONFIG.EVENT \
+                 SYSTEM.ADMIN.PERFM.EVENT \ \
+                 SYSTEM.ADMIN.PUBSUB.EVENT \
+                 SYSTEM.ADMIN.QMGR.EVENT \
+                 SYSTEM.ADMIN.TRACE.ROUTE.QUEUE \
+                 SYSTEM.AUTH.DATA.QUEUE \
+                 SYSTEM.CHANNEL.INITQ \
+                 SYSTEM.CHANNEL.SYNCQ \
+                 SYSTEM.CHLAUTH.DATA.QUEUE \
+                 SYSTEM.CLUSTER.COMMAND.QUEUE \
+                 SYSTEM.CLUSTER.HISTORY.QUEUE \
+                 SYSTEM.CLUSTER.REPOSITORY.QUEUE \
+                 SYSTEM.DEFAULT.INITIATION.QUEUE \
+                 SYSTEM.HIERARCHY.STATE \
+                 SYSTEM.INTERNAL.REPLY.QUEUE \
+                 SYSTEM.INTER.QMGR.CONTROL \
+                 SYSTEM.INTER.QMGR.FANREQ \
+                 SYSTEM.MQSC.REPLY.QUEUE \
+                 SYSTEM.SELECTION.EVALUATION.QUEUE \
+                 SYSTEM.SELECTION.VALIDATION.QUEUE; do
+      echo "${queue}"
+      $TIMEOUT --kill-after=$timeoutCallingQM $timeoutCallingQM $InstallationTree/bin/dmpmqmsg -m $qmgr_name -i ${queue} -r#100 -da -F $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DMPMQMSG/${queue};
+      if [[ $? -eq 124 ]]; then
+        timeout_occured=1
+      fi
+    done >$WorkingDir/$WorkRoot-QMGR-$qmgr_name/DMPMQMSG/msg-numbers 2>&1
+
+    if [[ $timeout_occured -ne 0 ]]; then
+      sdcp_print "sdcp:: "
+      sdcp_print "sdcp:: Warning!"
+      sdcp_print "sdcp:: dmpmqmsg timeout after ${timeoutCallingQM} seconds"
+      sdcp_print "sdcp:: dmpmqmsg output might be incomplete"
+      sdcp_print "sdcp:: Adjust timeout value (-t option) and retry or resolve the dmpmqmsg block"
+      sdcp_print "sdcp:: "
+    fi
+
+    $TIMEOUT --kill-after=$timeoutCallingQM $timeoutCallingQM $InstallationTree/bin/dmpmqaut -m $qmgr_name > $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DMPMQAUT 2>&1
+    if [[ $? -eq 124 ]]; then
+      sdcp_print "sdcp:: "
+      sdcp_print "sdcp:: Warning!"
+      sdcp_print "sdcp:: dmpmqaut timeout after ${timeoutCallingQM} seconds"
+      sdcp_print "sdcp:: dmpmqaut output might be incomplete"
+      sdcp_print "sdcp:: Adjust timeout value (-t option) and retry or resolve the dmpmqaut block"
+      sdcp_print "sdcp:: "
+    fi
+
+    $InstallationTree/bin/dspmqusr -m $qmgr_name > $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DSPMQUSR 2>&1
+
+    # dspmqfls logging
+    ## Save the property of the display mode
+    $InstallationTree/bin/runnscnf -g > $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DSPMQFLS 2>&1 <<EOF | ${GREP} "Value:[ ]*T"
+list(QueueManager,CurrentQMGR,DisplayFLSUnix)
+EOF
+    ## now call runnscnf to show all queue files. dspmqfls would only work while running qmgr
+    $InstallationTree/bin/runnscnf $qmgr_name >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DSPMQFLS 2>&1 <<EOF
+dis '*'
+EOF
+
+    #
+    # Gather file info for all queue files
+    #
+    if [[ -f $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DSPMQFLS ]];
+    then
+      sdcp_print "sdcp:: Gathering queue file statistics"
+      for GFILE in $(${GREP} 'Guardian file: ' $WorkingDir/$WorkRoot-QMGR-$qmgr_name/DSPMQFLS | ${SED} 's/Guardian file: *//g');
+      do
+        ${GTACL} -s -c "FUP INFO ${GFILE},statistics" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/QUEUE_statistics
+      done
+    fi
+
+    # dump amqparms file via runnscnf
+    ## global:
+    $InstallationTree/bin/runnscnf -g >> $WorkingDir/$WorkRoot-RUNNSCNF 2>&1 <<EOF
+list all
+EOF
+    ## and qmgr local:
+    $InstallationTree/bin/runnscnf $qmgr_name >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/RUNNSCNF 2>&1 <<EOF
+list all
+list (,ActualEnvironment,) all
+EOF
+
+    #
+    # Gather Cache manager statistics
+    #
+    echo "list (CacheManager,,ProcessName)" | $InstallationTree/bin/runnscnf $qmgr_name | ${GREP} Value: | ${SED} -e 's/.*\$/$/g' -e 's/:.*//g' | while read line; do  ${GTACL} -s -c "status $line"; done | ${GREP} amqcache | ${GREP}  '  X ' | ${SED} -e 's/   X.*//g' | while read line; do echo; echo; echo \# - - - - - amqcache $line - - - - -; echo \#; echo  "open $line; query qs; query cs;" | $InstallationTree/bin/runnscnf $qmgr_name; done >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/RUNNSCNF
+
+    #$InstallationTree/bin/amqrrmit -m $qmgr_name > $WorkingDir/$WorkRoot-QMGR-$qmgr_name/AMQRRMIT 2>&1
+
+# With MQv8 we do not have to run on each cpu, since it jumps to home and we do not scale (yet). Args are expanded according to Unix specs (S,T).
+#    cpu=0
+#    while (( $cpu < 16 )); do
+    $TIMEOUT --kill-after=$timeoutCallingQM $timeoutCallingQM $InstallationTree/bin/amqrfdm -m $qmgr_name > $WorkingDir/$WorkRoot-QMGR-$qmgr_name/AMQRFDM 2>&1 << EOF
+    if [[ $? -eq 124 ]]; then
+      sdcp_print "sdcp:: "
+      sdcp_print "sdcp:: Warning!"
+      sdcp_print "sdcp:: amqrfdm timeout after ${timeoutCallingQM} seconds"
+      sdcp_print "sdcp:: amqrfdm output might be incomplete"
+      sdcp_print "sdcp:: Adjust timeout value (-t option) and retry or resolve the amqrfdm block"
+      sdcp_print "sdcp:: "
+    fi
++
+>
+
+s
+q
+m
+T
+S
+#
+t
+Q
+EOF
+#      cpu=$((cpu+1))
+#    done
+     ${CD} -
+  else
+     sdcp_print "sdcp:: Excluding runmqsc data collection "
+  fi
+
+}
+
+function sdcp_qmgr2_in
+{
+# Figure out the Guardian filesystem names we need
+# \NODE.$VOL.SUBVOL.FILE
+GQMName=`gname -s $qmdir/G/AMQCLCKS`
+# $VOL.SUBVOL.FILE
+GQMNameNoNode=${GQMName##\\+([A-Za-z])*([A-Za-z0-9]).}
+# $VOL.SUBVOL
+GQMVolSubVol=${GQMNameNoNode%%.+([A-Za-z])*([A-Za-z0-9])}
+# SUBVOL
+GQMSubVol=${GQMVolSubVol##\$+([A-Za-z])*([A-Za-z0-9]).}
+# $VOL
+GQMVol=${GQMVolSubVol%%.+([A-Za-z])*([A-Za-z0-9])}
+# VOL
+GQMVolNoDollar=${GQMVol##\$}
+
+# set FUP script file variables and start up a script
+QM_FUP_180_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/qmxxxfup
+QM_FUP_101_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/qmyyyfup
+QM_FUP_180_FILE_GRD=$GExeVolSubVol.qmxxxfup
+QM_FUP_101_FILE_GRD=$GExeVolSubVol.qmyyyfup
+qmgr_fup_start
+
+qmgr_fup_add "LISTOPENS $GQMVolSubVol.*"
+qmgr_fup_add "LISTLOCKS $GQMVolSubVol.*, detail"
+qmgr_fup_run $WorkingDir/$WorkRoot-QMGR-$qmgr_name/QMFUPdata2
+qmgr_fup_end
+
+}
+
+function sdcp_sys_in
+{
+# \NODE.$VOL.SUBVOL.FILE
+GExeName=`gname -s $InstallationTree/bin/G/DSPMQ`
+# $VOL.SUBVOL.FILE
+GExeNameNoNode=${GExeName##\\+([A-Za-z])*([A-Za-z0-9]).}
+# $VOL.SUBVOL
+GExeVolSubVol=${GExeNameNoNode%%.+([A-Za-z])*([A-Za-z0-9])}
+# SUBVOL
+GExeSubVol=${GExeVolSubVol##\$+([A-Za-z])*([A-Za-z0-9]).}
+# $VOL
+GExeVol=${GExeVolSubVol%%.+([A-Za-z])*([A-Za-z0-9])}
+# VOL
+GExeVolNoDollar=${GExeVol##\$}
+
+# set FUP script file variables and start up a script
+SYS_FUP_180_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/stxxxfup
+SYS_FUP_101_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/styyyfup
+SYS_FUP_180_FILE_GRD=$GExeVolSubVol.stxxxfup
+SYS_FUP_101_FILE_GRD=$GExeVolSubVol.styyyfup
+sys_fup_start
+
+# set TACL script file variables and start up a script
+SYS_TACL_180_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/stxxxtcl
+SYS_TACL_101_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/styyytcl
+SYS_TACL_180_FILE_GRD=$GExeVolSubVol.stxxxtcl
+SYS_TACL_101_FILE_GRD=$GExeVolSubVol.styyytcl
+sys_tacl_start
+
+
+#
+# Terminal output Capture individual interesting vprocs
+#
+if [ $RETVAL -eq 0 ] ;then
+  for nsprog in $tmfprogs $dp2progs $nssprogs $ossprogs $pwyprogs $tcpprogs
+    do
+    {
+      sys_tacl_add "VPROC \$SYSTEM.$sysnn.$nsprog"
+    };done;
+fi
+
+#
+# Need versions of critcal dependent products
+# Find SYSnn
+#
+sysnn1=`${GTACL} -s -c "SYSINFO" | ${GREP} "Current SYSnn"`
+sysnn=${sysnn1##* }
+
+#
+# Find OS type - J or L
+#
+gversion=`${GTACL} -s -term /G/ZHOME -c sysinfo | ${GREP} "Software release ID"`
+gversion=${gversion##* }
+gversion=${gversion%%[0-9]*}
+
+#
+# Capture process names of all servers running from sysnn and system
+#
+sys_tacl_add "STATUS *,PROG \$SYSTEM.$sysnn.*"
+sys_tacl_add "STATUS *,PROG \$SYSTEM.SYSTEM.*"
+
+#
+# Check if a $CMON is running
+#
+sys_tacl_add "STATUS \$CMON"
+
+#
+# Capture vprocs of important programs typically run from $SYSTEM.SYSTEM
+#
+if [ $RETVAL -eq 0 ] ;then
+  sys_tacl_add "VPROC \$SYSTEM.SYSTEM.PATHMON"
+  sys_tacl_add "VPROC \$SYSTEM.SYSTEM.PATHTCP2"
+fi
+
+#
+# lists of NSS server programs to get info on
+#
+tmfprogs="TMFBOUT TMFCTLG TMFMON TMFMON2 TMFTMP"
+dp2progs="TSYSDP2"
+nssprogs="OSMON OSMP INITDLL"
+#
+# Need to retrieve VPROC info for OSSLS2 executable on 'J' & 'L' series systems
+if [ $gversion = "J" ] || [ $gversion = "L" ] ; then
+   ossprogs="OSH OSSFM OSSLS OSSMON OSSPS OSSTA OSSTH OSSLS2"
+fi
+pwyprogs="ROUT"
+tcpprogs="TCP6MAN TCP6MON TCP6SAM TCPIP ZTCP6DLL"
+
+#
+# Capture individual interesting vprocs
+#
+if [ $RETVAL -eq 0 ] ;then
+  for nsprog in $tmfprogs $dp2progs $nssprogs $ossprogs $pwyprogs $tcpprogs
+    do
+    {
+      sys_tacl_add "VPROC \$SYSTEM.$sysnn.$nsprog"
+    };done;
+fi
+
+#Install wide data first
+#
+# Guardian install filesystem listing
+
+sys_fup_add "INFO $GExeVolSubVol.*, detail"
+sys_fup_add "LISTOPENS $GExeVolSubVol.*"
+sys_fup_add "LISTLOCKS $GExeVolSubVol.*, detail"
+
+
+#
+# Run the fup script
+
+sys_fup_run $WorkingDir/$WorkRoot-FUPexe
+sys_fup_end
+
+
+# Cut down default level of WHOHAS to save time
+if [[ $DetailedWHOHAS = "TRUE" ]] ;then
+  for gfile in `gname -s $RuntimeTree/G/amqparms 2> /dev/null` ;
+    do
+    {
+      sys_tacl_add "WHOHAS $gfile"
+    };done;
+ fi
+
+# All processes running under this userid
+
+sys_tacl_add "STATUS *, USER"
+
+# Vprocs of all executables
+
+if [ $RETVAL -eq 0 ] ;then
+   sys_tacl_add "VPROC $GExeVolSubVol.*"
+fi
+
+# System and MQ install overall info
+
+sys_tacl_add "SYSINFO"
+sys_tacl_add "WHO"
+
+
+# capture dll vprocs
+#
+# Find the DLLs
+if [ $RETVAL -eq 0 ] ;then
+  dllsv=$(${GTACL} -s -c "FUP LISTOPENS \$SYSTEM.ZDLL*.*PUTDLL" | ${AWK} '/\$SYSTEM.*.[XZ]PUTDLL/ { split($1,a,".") ; print a[2] }')
+  # Vproc them all
+  for dll in `ls /G/SYSTEM/$dllsv/*`
+    do
+    {
+      env -  /bin/vproc $dll >> $WorkingDir/$WorkRoot-DLLvprocs
+    };done;
+fi
+
+# More info on Guardian files
+sys_tacl_add "FILEINFO $GExeVolSubVol.*"
+
+
+#
+# System status and resource information
+#
+
+# TMF status
+sys_tacl_add "TMFCOM; STATUS TMF; STATUS DATAVOLS; STATUS RESOURCEMANAGER; STATUS OPERATIONS"
+sys_tacl_add "TMFCOM; INFO TMF; STATUS TRANSACTIONS"
+
+# Guardian volume status
+sys_tacl_add "DSAP *, SHORT"
+
+# Physical memory status and
+# when was the CPU last cold loaded?
+
+cpu=0
+while (( $cpu < 16 )); do
+  sys_tacl_add "PEEK /CPU $cpu/"
+  sys_tacl_add "STATUS $cpu,0,DETAIL"
+  cpu=$((cpu+1))
+done
+
+
+# Virtual memory status
+sys_tacl_add 'nskcom; status kmsf'
+sys_tacl_add 'nskcom; info swapfile $*'
+sys_tacl_add 'nskcom; status swapfile $*, detail'
+sys_tacl_add 'nskcom; status swap-usage *, detail'
+
+# OSS server and fileset status
+sys_tacl_add "scf; status fileset \$ZPMON.*,detail;status server \$ZPMON.* ,detail"
+
+# EMS logs
+# EMSCINFO gathers basic config info about their EMS system
+#
+
+sys_tacl_add "emscinfo"
+
+#
+# TCP/IP Info
+#
+
+# collect basic info
+sys_tacl_add "scf listdev tcpip"
+sys_tacl_add "scf listdev tcpipv6"
+
+# Conventional - need to get a list of them and individually query
+for tcpproc in $(${GTACL} -s -c "SCF LISTDEV TCPIP" | ${AWK} '/TCPIP/ { print $2 }')
+  do
+  {
+    sys_tacl_add "scf; assume process $tcpproc; status; listopens,detail"
+  };done;
+
+# TCP/IP v6
+# obtain name of monitor process TCP6MAN, usually $ZZTCP
+tcpmon=$(${GTACL} -s -c "STATUS *,PROG \$SYSTEM.$sysnn.TCP6MAN" | ${AWK} '/\$/ { print $1 }' | uniq)
+sys_tacl_add "scf; status mon $tcpmon.*;listopens mon $tcpmon.*,detail"
+
+# CLIM
+# obtain name of monitor process CIPMAN, usually (always?) $ZZCIP
+tcpmon=$(${GTACL} -s -c "STATUS *,PROG \$SYSTEM.$sysnn.CIPMAN" | ${AWK} '/\$/ { print $1 }' | uniq)
+sys_tacl_add "scf; status prov $tcpmon.*;listopens prov $tcpmon.*;listopens prov $tcpmon.*,detail"
+
+#
+# Run the TACL script
+#
+sys_tacl_run $WorkingDir/$WorkRoot-TACLexe >/dev/null
+sys_tacl_end
+
+#other system wide info...
+df   > $WorkingDir/$WorkRoot-DF
+hostname > $WorkingDir/$WorkRoot-Hostname
+ls -1 /E/ > $WorkingDir/$WorkRoot-ExpandNodes
+i=0 && while ((i<number_of_cpu)); do
+  run -cpu=${i} ipcs -a > $WorkingDir/$WorkRoot-IPCs.${i}
+  ((i+=1))
+done
+}
+
+function check_entropy_daemon
+{
+  echo - - - Files - - - - - - - - - - - - - - - - - - - - - - - - - -; echo
+  ${LS} -l /etc/egd-pool
+  ${LS} -l /usr/coreutils/sbin/prngd
+  ${LS} -l /usr/coreutils/sbin/-prngd
+  ${LS} -l /var/run/egd-pool
+
+  echo; echo - - - OSS proc - - - - - - - - - - - - - - - - - - - - - - - - - -; echo
+
+  ${PS} -ef | ${GREP} [p]rngd
+  ${PS} -ef | ${GREP} [a]mqjkdm0
+
+  echo; echo - - - GUARDIAN proc - - - - - - - - - - - - - - - - - - - - - - - - - -; echo
+
+  ${GTACL} -c 'status $ETPD1,detail'
+  ${GTACL} -c 'status $ETPD2,detail'
+
+  echo; echo - - - OpenSSL test - - - - - - - - - - - - - - - - - - - - - - - - - -; echo
+
+  echo "OpenSSL> $($InstallationTree/bin/openssl rand -hex 128)"
+
+  echo; echo - - - - - - - - - - - - - - - - - - - - - - - - - -; echo
+}
+
+#############################
+# MAIN routine starts here  #
+#############################
+
+# Default location for files to be created as data is gathered
+WorkingDir=$PWD
+export WorkingDir
+# Postfixes for final archive filenames
+# Postfixes for final archive filenames
+ArchivePostfix="archive.tar"
+TarballPostfix="archive.tar.Z"
+
+usage="usage: sdcp [-d] [-e] [-f] [-w workingdir] [-m queuemgr] [-p full pmr number] [-c full salesforce case id] [-t timeout in seconds for runmqsc, amqrfdm, dmpmqaut, dmpmqcfg and dmpmqmsg]"
+
+#Check for single inproper argument passed to sdcp
+if [ $# -eq 1 ] ; then
+    hyphen=$(echo $* | cut -c 1)
+    sdcp_arg_len=$(echo $* | wc -c)
+    if [ $hyphen != "-" ] || [ $sdcp_arg_len -gt 2 ] ;then
+        echo $usage
+        exit 8
+    fi
+fi
+
+timeoutCallingQM=0
+
+while getopts "dexfw:m:p:c:t:" opt; do
+  case $opt in
+  d ) debug=1 ;;
+  w ) WorkingDir=$OPTARG ;;
+  m ) QMgr=$OPTARG ;;
+  p ) pmrNumber=$OPTARG ;;
+  c ) userCase=$OPTARG ;;
+  e ) excludemq=1 ;;
+  x ) doAmqxdbg=1 ;;
+  f ) DetailedWHOHAS="TRUE" ;;
+  t ) timeoutCallingQM=$OPTARG ;;
+  * ) echo $usage
+      exit 8 ;;
+  esac
+done
+export excludemq
+export doAmqxdbg
+export timeoutCallingQM
+
+if [[ -n $debug ]] ;then
+    set -x;set -v
+fi
+
+# WI 1455
+# Generate absolute path for WorkingDir
+oldPWD=${PWD}
+${CD} ${WorkingDir}
+WorkingDir=${PWD}
+${CD} ${oldPWD}
+
+#Log executed command
+sdcp_print "sdcp:: Running command: sdcp $*"
+sdcp_print "sdcp:: Working directory: $WorkingDir"
+
+#
+# Check if MQM group userid is being used to run sdcp; if not, then prompt the user if they wish to continue.
+logon=$(id | ${AWK} '{print $2}' | ${GREP} "MQM");
+if [[ -z $logon ]];then
+  sdcp_print "****** MQM Group user id is not being used to run SDCP ******"
+  sdcp_print "SDCP tool may can only be run by a member of the MQM group.  "
+  sdcp_print "Please logon using an MQM Group user id in order to run SDCP."
+  sdcp_print "This tool will now end...                                    "
+  exit 8
+else
+  sdcp_print "sdcp:: Executing user: $(id)"
+fi
+
+#
+# Validate working directory
+#
+
+if [[ ! -d $WorkingDir ]]; then
+   sdcp_print "sdcp:: $WorkingDir does not appear to be a directory"
+   exit 8
+fi
+
+#
+# Check if workingdirectory is a Guardian directory, if so end sdcp with warning
+#
+if [[ $WorkingDir/ = /G/* ]];
+then
+  sdcp_print "sdcp:: $WorkingDir is a Guardian location.         "
+  sdcp_print "       Working directory may only be a local OSS location."
+  sdcp_print "       This tool will now end...                          "
+  exit 8
+fi
+
+#
+# Check if workingdirectory is a Expand directory, if so end sdcp with warning
+#
+if [[ $WorkingDir/ = /E/* ]];
+then
+  sdcp_print "sdcp:: $WorkingDir is an Expand location.                 "
+  sdcp_print "       Working directory may only be a local OSS location."
+  sdcp_print "       This tool will now end...                          "
+  exit 8
+fi
+
+#
+# Setup the installation (opt) tree
+# Priority is: MQINST > LCL_MQ_INSTALLATION_PATH
+#
+
+if [[ -n $InstallationTree ]]; then
+   sdcp_print "sdcp:: Unsetting InstallationTree"
+   unset InstallationTree
+fi
+
+if [[ -n $RuntimeTree ]]; then
+   sdcp_print "sdcp:: Unsetting RuntimeTree"
+   unset RuntimeTree
+fi
+
+if [[ -n $MQINST ]]; then
+  sdcp_print "sdcp:: Using \$MQINST=$MQINST ..."
+  if [[ -x $MQINST/opt/mqm/dspmqver ]]; then
+    sdcp_print "sdcp:: \$MQINST, is valid a MQ location."
+    InstallationTree=$MQINST/opt/mqm
+  else
+    InstallationTree=${LCL_MQ_INSTALLATION_PATH}
+  fi
+else
+  InstallationTree=${LCL_MQ_INSTALLATION_PATH}
+fi
+
+if [[ ! -d $InstallationTree ]]; then
+   sdcp_print "sdcp:: Could not find valid InstallationTree='$InstallationTree'"
+   exit 8
+fi
+
+RuntimeTree="${InstallationTree%/opt/mqm}"      # cut /opt/mqm suffix
+RuntimeTree="${RuntimeTree}/var/mqm"
+if [[ ! -d $RuntimeTree ]]; then
+   sdcp_print "sdcp:: Could not find valid RuntimeTree='$RuntimeTree'"
+   exit 8
+fi
+
+sdcp_print "sdcp:: Using $InstallationTree as Installation Tree"
+sdcp_print "sdcp:: Using $RuntimeTree as Runtime Tree"
+
+export RuntimeTree
+export InstallationTree
+
+if [[ ${PWD}/ = ${RuntimeTree}/qmgrs/* ]]; then
+    sdcp_print "sdcp:: Cannot run SDCP from within a queue manager directory"
+    exit 8
+fi
+
+
+#
+# Possibly source in mqprofile
+#
+# We proceed with the sdcp without source the mqprofile, only if
+# the _RLD_LIB_PATH and _RLD_FIRST_LIB_PATH
+# are not pointing to another MQ installation
+# compared to $InstallationTree.
+#
+mq_profile=${LCL_MQ_INSTALLATION_PATH%/opt/mqm}/var/mqm/mqprofile
+if [[ "${LCL_MQ_INSTALLATION_PATH}" = //opt/mqm  ]]; then
+  installFolderName=/
+else
+  installFolderName=${LCL_MQ_INSTALLATION_PATH%/opt/mqm}    # cut /opt/mqm suffix
+  installFolderName=${installFolderName##*/}                # cut prefix until last "/"
+fi
+
+if [[ -z "$installFolderName" ]]; then
+  sdcp_print "sdcp:: Cannot determine installation folder name in"
+  sdcp_print "sdcp:: LCL_MQ_INSTALLATION_PATH '$LCL_MQ_INSTALLATION_PATH'"
+  exit 8
+fi
+
+for aPath in $(echo $_RLD_LIB_PATH $_RLD_FIRST_LIB_PATH | tr ":" " " ); do
+
+  # if aPath is a directory and contains "/opt/mqm/" substring
+  if [[ -d "$aPath" ]] && [[ "$aPath" = *"/opt/mqm/"* ]]; then
+
+    if [[ -n "$REALPATH" ]]; then
+      aPath=$(${REALPATH} "$aPath")
+    fi
+
+    aPath=${aPath%/opt/mqm*}      # cut suffix "/opt/mqm*"
+    if [[ -z $aPath ]]; then
+      aPath=/
+    fi
+    if [[ -n "$aPath" ]]; then
+      folderName=${aPath##*/}     # cut prefix until last "/"
+
+      if [[ -z "$folderName" ]]; then
+        folderName=/
+      fi
+
+      # If folder names do not match, abort sdcp
+      if [[ ! "$installFolderName" = "$folderName" ]]; then
+        sdcp_print "sdcp:: The _RLD_LIB_PATH or _RLD_FIRST_LIB_PATH are pointing to"
+        sdcp_print "sdcp:: another MQ installation. This would result in unwanted library calls."
+        sdcp_print "sdcp::   _RLD_LIB_PATH='$_RLD_LIB_PATH'"
+        sdcp_print "sdcp::   _RLD_FIRST_LIB_PATH='$_RLD_FIRST_LIB_PATH'"
+        echo ""
+        echo "Please source in mqprofile using ..."
+        echo ". $mq_profile"
+        echo ""
+        exit 8
+      fi
+    fi
+  fi
+done
+
+
+#
+# Check if pstate2 is available
+#
+if [[ -f /G/system/system/pstate2 ]];then
+  PSTATE2AVAILABLE="TRUE"
+else
+  PSTATE2AVAILABLE="FALSE"
+fi
+
+#
+# Validate the queue manager name
+# and translate to the directory...
+#
+
+ValidQM="FALSE"
+if [[ ! -z $QMgr ]] ;then
+  # Search the mqs.ini for a matching queue manager name
+  for qm in $(${AWK} '/^QueueManager:/ { getline ; split($1,a,"=") ; print a[2] }' < $RuntimeTree/mqs.ini) ;
+    do
+    {
+      if [[ $qm = $QMgr ]] ;then
+        ValidQM="TRUE"
+        break
+      fi
+    };done;
+
+  if [[ $ValidQM = "TRUE" ]] ;then
+    # Find the directory for the queue manager in case its mangled
+    get_qmgr_directory $QMgr
+    qmdir=$Directory # is mangled name only
+    if [[ ! -d $RuntimeTree/qmgrs/$qmdir ]]; then
+      sdcp_print "sdcp:: Cannot map the queue manager name $QMgr to a directory"
+      sdcp_print "sdcp:: Directory = $qmdir"
+      exit 8
+    else
+        sdcp_print "sdcp:: Queue Manager directory = ${DataPath:-${RuntimeTree}/qmgrs/${Directory}}"
+    fi
+  else
+    sdcp_print "sdcp:: $QMgr does not appear to be a valid queue manager name"
+    exit 8
+  fi
+fi
+
+#
+# Validate the file name and update the WorkRoot string if valid pmrNumber used
+#
+
+if [[ ! -z $pmrNumber ]]; then
+
+  pmrLen=$(${EXPR} length "$pmrNumber")
+  if [[ $pmrLen -ne 13 ]]; then
+     sdcp_print "sdcp:: Invalid pmr number. valid format has 13 characters(xxxxx.yyy.zzz or xxxxx,yyy,zzz)"
+     exit 8
+  fi
+
+  if [[ $pmrNumber = $(echo "$pmrNumber" | tr -dc '[0-9a-zA-Z\.\,]') ]]; then
+     WorkRoot="$pmrNumber-SDCP-$datetime"
+  else
+     sdcp_print "sdcp:: Invalid pmr number. Valid characters are '0-9' 'Aa-Zz' '.' ',' "
+     exit 8
+  fi
+fi
+
+#
+# In Case we got a Salesforce case identifier
+#
+if [[ ! -z $userCase ]]; then
+  if [[ ! -z $pmrNumber ]]; then #inform user
+    sdcp_print "sdcp:: -p ${pmrNumber} was supplied along -c ${userCase} and will be ignored." 
+  fi
+  if [ ! -z "$userCase" ]; then
+    caseNumber="`printf \"%s\" \"$userCase\" | ${SED} 's/^[Tt][Ss]0*//' 2>/dev/null`"
+    if printf "%s" "$caseNumber" | grep -Eq '[^[:digit:]]'; then
+      printf >&2 "sdcp:: Invalid case number '%s'\n" "$userCase"
+      exit 8
+    fi
+  
+    caseNumber="`printf \"TS%09d\" \"$caseNumber\"`"
+    if ! printf "%s" "$caseNumber" | grep -Eq '^TS[[:digit:]]{9}$'; then
+      printf >&2 "sdcp:: case number '%s' is too long\n" "$userCase"
+      exit 8
+    fi
+  fi
+  WorkRoot="$caseNumber-SDCP-$datetime"
+fi
+export WorkRoot
+sdcp_print "sdcp:: All files created by sdcp have the prefix $WorkRoot"
+
+#
+# Activate amqxdbg if runmqsc is allowed
+#
+if [[ $doAmqxdbg -eq 1 ]] ; then
+  sdcp_print "sdcp:: Starting amqxdbg"
+  $InstallationTree/bin/amqxdbg -p \* >> $WorkingDir/$WorkRoot-amqxdbg
+else
+  sdcp_print "sdcp:: Skipping amqxdbg"
+fi
+
+# Vprocs of all OSS binaries
+###################################################
+#Validate write access to /tmp directory
+###################################################
+touch /tmp/tmp_access_test
+RETVAL=$?
+if [ $RETVAL -eq 0 ] ;then
+  ${RM} -rf /tmp/tmp_access_test
+  env -  /bin/vproc $InstallationTree/bin/* > $WorkingDir/$WorkRoot-VPROCbin
+  env -  /bin/vproc $InstallationTree/lib/* > $WorkingDir/$WorkRoot-VPROClib
+  env -  /bin/vproc $InstallationTree/lib64/* > $WorkingDir/$WorkRoot-VPROClib64
+else
+  sdcp_print "\n*****************************************************************************"
+  print "******* Access denied, Ensure user has write access to /tmp directory *******"
+  print "*****************************************************************************\n"
+  print "sys::: SDCP is skipping the collection of the vproc related data due to access denied"
+fi
+
+
+#
+# Derive various Guardian executable subvolume names
+# from the links in OSS
+#
+
+# \NODE.$VOL.SUBVOL.FILE
+# Export variables to the child process to access
+GExeName=`gname -s $InstallationTree/bin/G/DSPMQ`
+export GExeName
+# $VOL.SUBVOL.FILE
+GExeNameNoNode=${GExeName##\\+([A-Za-z])*([A-Za-z0-9]).}
+export GExeNameNoNode
+# $VOL.SUBVOL
+GExeVolSubVol=${GExeNameNoNode%%.+([A-Za-z])*([A-Za-z0-9])}
+export GExeVolSubVol
+# SUBVOL
+GExeSubVol=${GExeVolSubVol##\$+([A-Za-z])*([A-Za-z0-9]).}
+export GExeSubVol
+# $VOL
+GExeVol=${GExeVolSubVol%%.+([A-Za-z])*([A-Za-z0-9])}
+export GExeVol
+# VOL
+GExeVolNoDollar=${GExeVol##\$}
+export GExeVolNoDollar
+
+##################################
+# DATA COLLECTION starts here    #
+##################################
+export RETVAL=0
+
+# Figure out the CPU for parent sdcp process
+parent_cpu_number=$(${PS} -o addr -p $$ | ${CUT} -s -d',' -f1)
+sdcp_print "sdcp:: sdcp main process running on CPU $parent_cpu_number"
+
+#Find the available cpus on the machine
+count=0
+cpu_name=0
+proc_status=`${GTACL} -s -c "#PROCESSORSTATUS" | ${TAIL} -2`
+for cpu_no in $proc_status ;
+  do
+  if [ $cpu_no = "-1" ]; then
+    temp_cpu_number=`${EXPR} $count - 1`
+    if [ $temp_cpu_number -ne $parent_cpu_number ]; then
+      cpu_list[cpu_name]=$temp_cpu_number
+      ((cpu_name=cpu_name+1))
+    fi
+  fi
+  ((count=count+1))
+  done
+
+temp_cpuNo=`${EXPR} $cpu_name + 1`
+sdcp_print "sdcp:: $temp_cpuNo active CPU's are available on this machine"
+
+#Initialize the variables for CPU numbers
+sdcp1_on_cpu=$parent_cpu_number
+sdcp2_on_cpu=$parent_cpu_number
+sdcp3_on_cpu=$parent_cpu_number
+
+# Setting the CPU number to individual process to run
+cpu_list_counter=0
+#
+#Calculate the number of available CPU's in the machine
+#
+number_of_cpu=$(($cpu_name+1))
+case $number_of_cpu in
+1)
+  sdcp_print "sdcp:: sdcp is running on one CPU i.e. $parent_cpu_number"
+  sdcp1_on_cpu=$parent_cpu_number
+  sdcp2_on_cpu=$parent_cpu_number
+  sdcp3_on_cpu=$parent_cpu_number
+  ;;
+2)
+  sdcp_print "sdcp:: sdcp is running on two CPUs "
+  sdcp1_on_cpu=$parent_cpu_number
+  sdcp2_on_cpu=${cpu_list[cpu_list_counter]}
+  sdcp3_on_cpu=${cpu_list[cpu_list_counter]}
+  ;;
+3)
+  sdcp_print "sdcp:: sdcp is running on three CPUs"
+  sdcp2_on_cpu=$parent_cpu_number
+  sdcp1_on_cpu=${cpu_list[cpu_list_counter]}
+  ((cpu_list_counter=cpu_list_counter+1))
+  sdcp3_on_cpu=${cpu_list[cpu_list_counter]}
+  ;;
+*)
+  sdcp_print "sdcp:: sdcp now running on four different CPUs"
+  sdcp1_on_cpu=${cpu_list[cpu_list_counter]}
+  ((cpu_list_counter=cpu_list_counter+1))
+  sdcp2_on_cpu=${cpu_list[cpu_list_counter]}
+  ((cpu_list_counter=cpu_list_counter+1))
+  sdcp3_on_cpu=${cpu_list[cpu_list_counter]}
+  ;;
+esac
+
+#Invoke a child process to collect some of system related information
+sdcp_sys_in
+sdcp_sys_pid=$!
+#sdcp_print "process $sdcp_sys_pid is invoked to collect sys related FUP data and running on CPU $sdcp1_on_cpu"
+
+
+#
+# Queue Manager specific data
+#
+
+if [[ -z $QMgr ]] ;then
+  qmdir=`${LS} $RuntimeTree/qmgrs`
+fi
+
+# cope with mangled qmgr directory names when running MQ utilities.
+for qmgr_dir in $qmdir ;
+  do
+  {
+    # Everything else is required only for real queue managers
+    if [[ $qmgr_dir = "@SYSTEM" ]] ; then
+      ${MKDIR} $WorkingDir/$WorkRoot-QMGR-$qmgr_dir
+      sdcp_print "sdcp:: Collecting OSS data for queue manager @SYSTEM from $qmgr_dir directory"
+      ${CP} -pR $RuntimeTree/qmgrs/$qmgr_dir $WorkingDir/$WorkRoot-QMGR-$qmgr_dir/OSSfiles
+      continue;
+    else
+      # Derive queue manager name from possibly mangled directory name
+      # Search the mqs.ini for a matching queue manager directory
+      qmgr_name=""
+      for qmtemp in $(${AWK} '/^QueueManager:/ { getline ; split($1,a,"=") ; print a[2] }' < $RuntimeTree/mqs.ini) ;
+        do
+        {
+          get_qmgr_directory $qmtemp
+          qmdir=${DataPath:-${RuntimeTree}/qmgrs/${Directory}}
+          if [[ ${qmdir##*/} = $qmgr_dir ]] ;then
+            qmgr_name=$qmtemp
+            break
+          fi
+        };done;
+
+      if [ ! -d "$WorkingDir/$WorkRoot-QMGR-$qmgr_name" ]; then
+        ${MKDIR} $WorkingDir/$WorkRoot-QMGR-$qmgr_name
+      fi
+      sdcp_print "sdcp:: Collecting OSS data for queue manager $qmgr_name from $qmdir directory"
+      ${CP} -pR -W NOG $qmdir $WorkingDir/$WorkRoot-QMGR-$qmgr_name/OSSfiles
+	  if [[ ! -z ${DataPath} ]];then
+	    # copy remaining OSS files from default varpath
+		sdcp_print "sdcp:: Collecting additional OSS data for queue manager $qmgr_name from ${RuntimeTree}/qmgrs/${Directory} directory"
+		${CP} -pR -W NOG ${RuntimeTree}/qmgrs/${Directory}/* $WorkingDir/$WorkRoot-QMGR-$qmgr_name/OSSfiles/
+	  fi
+    fi
+    export qmgr_name
+    export qmgr_dir
+    export qmdir
+
+    sdcp_print "sdcp:: Child is scheduled to run on CPU $sdcp2_on_cpu"
+    #Invoke a child process to collect some of qmgr specific data
+    sdcp_qmgr_in
+    sdcp_qmgr_pid=$!
+    #sdcp_print "process $sdcp_qmgr_pid is invoked to collect GRDfiles and some of FUP data for qmgr $qmgr_name"
+
+    # Invoke another child process to collect part of FUP data
+    sdcp_print "sdcp:: Child is scheduled to run on CPU $sdcp3_on_cpu"
+    sdcp_qmgr2_in
+    sdcp_2nd_pid=$!
+    sdcp_print "process $sdcp_2nd_pid invoked to collect qmgr $qmgr_name specific FUP data"
+
+    # set TACL script file variables and start up a script
+    TACL_180_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/xxxtcl
+    TACL_101_FILE_OSS=/G/$GExeVolNoDollar/$GExeSubVol/yyytcl
+    TACL_180_FILE_GRD=$GExeVolSubVol.xxxtcl
+    TACL_101_FILE_GRD=$GExeVolSubVol.yyytcl
+    tacl_start
+
+    # Figure out the Guardian filesystem names we need
+    # \NODE.$VOL.SUBVOL.FILE
+    GQMName=`gname -s $qmdir/G/AMQCLCKS`
+    # $VOL.SUBVOL.FILE
+    GQMNameNoNode=${GQMName##\\+([A-Za-z])*([A-Za-z0-9]).}
+    # $VOL.SUBVOL
+    GQMVolSubVol=${GQMNameNoNode%%.+([A-Za-z])*([A-Za-z0-9])}
+    # SUBVOL
+    GQMSubVol=${GQMVolSubVol##\$+([A-Za-z])*([A-Za-z0-9]).}
+
+    sdcp_print "sdcp:: Collecting WHOHAS for $qmgr_name"
+
+    # Collect whohas info on Guardian queue manager files
+
+    tacl_add "FILEINFO $GQMVolSubVol.*"
+
+    # Reduce level of WHOHAS detail by default
+    if [[ $DetailedWHOHAS = "TRUE" ]] ;then
+      sdcp_print "sdcp:: Collecting Detailed WHOHAS info for $qmgr_name"
+      for gfile in `gname -s $qmdir/G/amqclcks 2> /dev/null` ;
+        do
+        {
+          tacl_add "WHOHAS $gfile"
+        };done;
+
+      for gfile in `gname -s $qmdir/G/amqtrans 2> /dev/null` ;
+        do
+        {
+          tacl_add "WHOHAS $gfile"
+        };done;
+
+      for gfile in `gname -s $qmdir/G/amqtcons 2> /dev/null` ;
+        do
+        {
+          tacl_add "WHOHAS $gfile"
+        };done;
+    fi
+
+    tacl_run $WorkingDir/$WorkRoot-QMGR-$qmgr_name/WHOHAS
+    tacl_end
+
+    # Figure out if the queue manager is officially running
+
+    qmstatusline=`${GREP} CurrentStatus $qmdir/qmstatus.ini`
+    sdcp_print "sdcp:: queue manager $QMgr status is ${qmstatusline##*=} "
+    if [[ ${qmstatusline##*=} = "Running" ]] ; then
+      # create list of processes that seem to be running, based on
+      # open files in the queue manager subvolume
+      # be sure to capture primary and backup processes
+      # ...and obtain a pstate and status,detail for each of them
+      sdcp_print "sdcp:: Collecting PSTATE for qmgr $qmgr_name"
+      for process in `${GTACL} -s -c "FUP LISTOPENS $GQMVolSubVol.*" | \
+                        ${AWK} '/^[ \t]*[0-9]+,[0-9][0-9],[0-9]/ \
+                        { split($1,a,",") ; if ( a[3] != "0000" ) printf "%d,%d\n",a[2],substr(a[3],0,4) }' | sort | uniq ` ;
+        do
+        {
+          ${GTACL} -s -c "STATUS $process,DETAIL" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/STATUS
+          ${GTACL} -s -c "PSTATE $process" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE
+          if [[ ${PSTATE2AVAILABLE} = "TRUE" ]];then
+            ONCPU=`echo $process | sed 's/,.*//g'`
+            # Write header into file for easier process finding
+            echo "+++ PSTATE2 for ${process}" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE2
+            ${GTACL} -s -c "PSTATE2 /CPU $ONCPU/ ${process} CRE" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE2
+            ${GTACL} -s -c "PSTATE2 /CPU $ONCPU/ ${process} UNW" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE2
+          fi
+        };
+      done;
+
+      for cpupin in `${PS} -o addr,args | ${GREP} -E "$InstallationTree" | ${GREP} -E "$qmgr_name" | \
+                  ${GREP} -v "ksh" | ${AWK} {'print $1'} | sort | uniq `;
+        do
+        {
+          ${GTACL} -s -c "STATUS ${cpupin},DETAIL" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/STATUS_oss
+          ${GTACL} -s -c "PSTATE ${cpupin}" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE_oss
+
+          if [[ ${PSTATE2AVAILABLE} = "TRUE" ]];then
+            # Write header into file for easier process finding
+            ONCPU=`echo $cpupin | sed 's/,.*//g'`
+            echo "+++ PSTATE2 for ${cpupin}" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE2_oss
+            ${GTACL} -s -c "PSTATE2 /CPU $ONCPU/ ${cpupin} CRE" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE2_oss
+            ${GTACL} -s -c "PSTATE2 /CPU $ONCPU/ ${cpupin} UNW" >> $WorkingDir/$WorkRoot-QMGR-$qmgr_name/PSTATE2_oss
+          fi
+        };
+      done;
+    fi
+    sdcp_print "sdcp:: sdcp main  process completed assigned task"
+    sdcp_print "sdcp:: Now sdcp parent monitoring other sdcp process"
+    child_process_check=1
+
+    # Wait till sdcp childs complete collecting q-manager specific data
+    #while [ $child_process_check -eq 1 ]
+    #do
+    #  ${PS} -eaf | ${GREP} $sdcp_qmgr_pid | ${GREP} -v ${GREP} >/dev/null
+    #  ret=$?
+    #  ${PS} -eaf | ${GREP} $sdcp_2nd_pid | ${GREP} -v ${GREP} >/dev/null
+    #  ret3=$?
+      # Check if all the process completed there task
+    #  if [ "$ret" != "0" ] && [ "$ret3" != "0" ] ; then
+    #      sdcp_print "sdcp:: Qmgr specific data collection completed"
+    #      child_process_check=0
+    # else
+    #      sleep 5
+    #  fi
+    #done
+  };done;
+
+#
+# Check entropy daemon
+#
+check_entropy_daemon 2>&1 > $WorkingDir/$WorkRoot-entropy
+
+
+# Install wide data first
+sdcp_print "sdcp:: Collecting OSS filesystem information"
+# OSS install filesystem listing
+${LS} -lR $InstallationTree > $WorkingDir/$WorkRoot-LSLopt
+${LS} -lR $RuntimeTree > $WorkingDir/$WorkRoot-LSLvar
+
+#
+# Deactivate amqxdbg if runmqsc is allowed
+#
+if [[ $doAmqxdbg -eq 1 ]] ; then
+  sdcp_print "sdcp:: Stopping amqxdbg"
+  $InstallationTree/bin/amqxdbg -x -p \* >> $WorkingDir/$WorkRoot-amqxdbg
+fi
+
+# Installation error logs and FDCs
+sdcp_print "sdcp:: Collecting MQ error information"
+${MKDIR} $WorkingDir/$WorkRoot-errors
+#
+# We can't capture the non-mqm group data due to the security of the files,that is fine and expected,
+# Output a message to alert customer (as well as us) and to manually capture and provide the files.
+
+ls_out=$(ls -l $RuntimeTree/errors | ${AWK} '$4 == "MQM"{ print $9}')
+if [[ -n $ls_out ]]  ;then
+  for i in $ls_out
+   do
+     $CP -p $RuntimeTree/errors/$i $WorkingDir/$WorkRoot-errors 2>&1  | ${TEE} -a $WorkRoot-sdcp.log
+   done
+fi
+ls_out=$(ls -l $RuntimeTree/errors | ${AWK} '$4 !~ "MQM" { print $9}')
+if [[ -n $ls_out ]]  ;then
+  sdcp_print "SDCP tool found that the following files under"
+  sdcp_print " $RuntimeTree/errors"
+  sdcp_print "directory are not owned by any of MQM Group user ids"
+  sdcp_print "and hence could not be collected by the tool"
+  sdcp_print "Please review and if required, provide these files to IBM"
+  for i in $ls_out
+   do
+     sdcp_print $i
+   done
+fi
+
+# ini files etc
+sdcp_print "sdcp:: Collecting configuration files"
+${CP} -p $RuntimeTree/mqs.ini $WorkingDir/$WorkRoot-mqsini 2>&1  | ${TEE} -a $WorkRoot-sdcp.log
+${GTACL} -s -c "fup copy ${GExeVolSubVol}.AMQSINI,,a,share" 2>&1 > $WorkingDir/$WorkRoot-amqsini
+#${CP} -p $RuntimeTree/proc.ini $WorkingDir/$WorkRoot-procini 2>&1  | ${TEE} -a $WorkRoot-sdcp.log
+
+# trace files
+sdcp_print "sdcp:: Collecting trace information"
+count=$(ls -1 $RuntimeTree/trace/* |wc -l)
+if [[ $count -gt 0  ]] then
+  ${MKDIR} $WorkingDir/$WorkRoot-trace
+  ${CP} -p $RuntimeTree/trace/* $WorkingDir/$WorkRoot-trace 2>&1  | ${TEE} -a $WorkRoot-sdcp.log
+fi
+
+# installer logs
+sdcp_print "sdcp:: Collecting installation log files"
+${MKDIR} "$WorkingDir/$WorkRoot-installerLogs"
+${CP} -p "$InstallationTree/../.."/mq*\.log "$WorkingDir/$WorkRoot-installerLogs/"
+
+# Collect Saveabend files from Guardian if they exist
+sdcp_print "sdcp:: Checking for saveabend files"
+count=$(ls -1 $InstallationTree/bin/G/zzsa* |wc -l)
+if [[ $count -gt 0  ]] then
+  ${MKDIR} $WorkingDir/$WorkRoot-Gsaveabend
+  ${CP} -p $InstallationTree/bin/G/zzsa* $WorkingDir/$WorkRoot-Gsaveabend 2>&1  | ${TEE} -a $WorkRoot-sdcp.log
+fi
+
+# collect saveabend files from qmgrs directory if they exist
+sdcp_print "sdcp:: Checking for saveabends in ../var/mqm directory"
+count=$(ls -1 $RuntimeTree/ZZSA* |wc -l)
+if [[ $count -gt 0  ]] then
+ ${MKDIR} $WorkingDir/$WorkRoot-Osaveabend
+ ${CP} -p $RuntimeTree/ZZSA*   $WorkingDir/$WorkRoot-Osaveabend 2>&1  | ${TEE} -a $WorkRoot-sdcp.log
+fi
+
+# Patch history
+sdcp_print "sdcp:: Collecting installation history"
+if [[ -e "${InstallationTree}/mqpatch.dat" ]];then
+  ${CAT} ${InstallationTree}/mqpatch.dat > $WorkingDir/$WorkRoot-mqpatch.dat
+else
+  sdcp_print "sdcp:: No installation history found"
+fi
+
+# Status of queue managers
+sdcp_print "sdcp:: Collecting queue manager status details"
+$InstallationTree/bin/dspmq -x > $WorkingDir/$WorkRoot-dspmq
+
+sdcp_print "sdcp:: Collecting OSS version information"
+uname -a > $WorkingDir/$WorkRoot-OSSver
+  echo "" >>$WorkingDir/$WorkRoot-OSSver
+alias >> $WorkingDir/$WorkRoot-OSSver
+  echo "" >>$WorkingDir/$WorkRoot-OSSver
+set   >> $WorkingDir/$WorkRoot-OSSver
+  echo "" >>$WorkingDir/$WorkRoot-OSSver
+id    >> $WorkingDir/$WorkRoot-OSSver
+  echo "" >>$WorkingDir/$WorkRoot-OSSver
+hostname >> $WorkingDir/$WorkRoot-OSSver
+  echo "" >>$WorkingDir/$WorkRoot-OSSver
+echo "umask: $($UMASK)" >>$WorkingDir/$WorkRoot-OSSver
+  echo "" >>$WorkingDir/$WorkRoot-OSSver
+info_define -detail all >>$WorkingDir/$WorkRoot-OSSver
+  echo "" >>$WorkingDir/$WorkRoot-OSSver
+
+#
+# sdcp checks for MQ version in the valid place
+#
+${CD} $InstallationTree/bin
+$InstallationTree/bin/dspmqver >> $WorkingDir/$WorkRoot-DSPMQver
+$InstallationTree/bin/dspmqver -a >> $WorkingDir/$WorkRoot-DSPMQver
+${CD} -
+sdcp_print "sdcp:: sdcp parent completed assigned task"
+
+#sdcp checks for system info collection
+#sys_child_process_check=1
+#while [ $sys_child_process_check -eq 1 ]
+#    do
+#      ${PS} -eaf | ${GREP} $sdcp_sys_pid | ${GREP} -v ${GREP} >/dev/null
+#      ret2=$?
+#      if [ "$ret2" != "0" ] ; then
+#          sdcp_print "sdcp:: child completed collection of sys related info"
+#          sys_child_process_check=0
+#      else
+#          sleep 5
+#      fi
+#    done
+
+#
+# Create tarball
+#
+function createArchive2Steps
+{
+  sdcp_print "sdcp:: Creating archive (tar, compress) of collected data..."
+  ${TAR} -cf $WorkingDir/$WorkRoot-$ArchivePostfix $WorkingDir/$WorkRoot*
+  rc=$?
+  if ((rc != 0));then
+    sdcp_print "sdcp:: Creating of archive failed with error ${rc}."
+    exit 8
+  fi
+
+  print "Compressing archive..."
+  ${COMPRESS} -f $WorkingDir/$WorkRoot-$ArchivePostfix
+  rc=$?
+  if ((rc != 0));then
+    print "Compression of archive failed with error ${rc}."
+    print "File $WorkingDir/$WorkRoot-$ArchivePostfix can"
+    print "be sent to IBM Support (in binary transfer mode)"
+    print "to assist with analysis of your support issue instead."
+  else
+    print "Compressed archive $WorkingDir/$WorkRoot-$TarballPostfix created"
+    print "This file can be sent to IBM Support (in binary transfer mode)"
+    print "to assist with analysis of your support issue."
+  fi
+}
+
+function createArchive1Step
+{
+  sdcp_print "sdcp:: Creating archive (tar | compress) of collected data..."
+  ${TAR} -cf $WorkingDir/$WorkRoot-test.tar $WorkingDir/$WorkRoot-DSPMQver
+  rc=$?
+  rm -f $WorkingDir/$WorkRoot-test.tar
+  if ((rc != 0));then
+    createArchive2Steps
+  else
+    ${TAR} -c $WorkingDir/$WorkRoot* | ${COMPRESS} -cf > $WorkingDir/$WorkRoot-$TarballPostfix
+    rc=$?
+    if ((rc != 0));then
+      createArchive2Steps
+    else
+      print "Compressed archive $WorkingDir/$WorkRoot-$TarballPostfix created"
+      print "This file can be sent to IBM Support (in binary transfer mode)"
+      print "to assist with analysis of your support issue."
+    fi
+  fi
+}
+
+if [ -n "$SDCP_2STEPS" ]; then
+  createArchive2Steps
+else
+  sdcp_print "sdcp:: Creating archive of collected data..."
+  createArchive1Step
+fi
+
+#
+# Tidy up temporary working files
+#
+print "Tidying up (removing temporary files)..."
+
+for tempfile in $WorkingDir/$WorkRoot* ;
+  do
+  {
+    if [[ $tempfile != $WorkingDir/$WorkRoot-$TarballPostfix && $tempfile != $WorkingDir/$WorkRoot-$ArchivePostfix ]] ; then
+      ${RM} -rf $tempfile
+    fi
+  };
+done;

@@ -1,0 +1,37 @@
+/home/DEMO/jgit: ls -l
+total 13887
+-rwxr-xr-x    1 SUPER.AHO          SUPER    7109943 Nov 23  2017 org.eclipse.jgit.pgm-4.8.0.201706111038-r.sh
+/home/DEMO/jgit: ./org.eclipse.jgit.pgm-4.8.0.201706111038-r.sh
+jgit --git-dir GIT_DIR --help (-h) --show-stack-trace --version command [ARG ...]
+
+The most commonly used commands are:
+ add              Add file contents to the index
+ archive          Zip up files from the named tree
+ branch           List, create, or delete branches
+ checkout         Checkout a branch to the working tree
+ clean            Remove untracked files from the working tree
+ clone            Clone a repository into a new directory
+ commit           Record changes to the repository
+ config           Get and set repository or global options
+ daemon           Export repositories over git://
+ debug-lfs-store  Run LFS Store in a given directory
+ describe         Show the most recent tag that is reachable from a commit
+ diff             Show diffs
+ fetch            Update remote refs from another repository
+ gc               Cleanup unnecessary files and optimize the local repository
+ init             Create an empty git repository
+ log              View commit history
+ ls-remote        List references in a remote repository
+ ls-tree          List the contents of a tree object
+ merge            Merges two development histories
+ push             Update remote repository from local refs
+ reflog           Manage reflog information
+ repo             Parse a repo manifest file and add submodules
+ reset            Reset current HEAD to the specified state
+ rm               Stop tracking a file
+ show             Display one commit
+ status           Show the working tree status
+ tag              Create a tag
+ version          Display the version of jgit
+
+/home/DEMO/jgit:
